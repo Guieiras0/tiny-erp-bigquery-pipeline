@@ -1,0 +1,29 @@
+# Credenciais e segredos
+*.json
+!package.json
+*.env
+.env
+service-account*.json
+credentials/
+secrets/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# VS Code / IDE
+.vscode/
+.idea/
+
+# Logs e temporários
+*.log
+tmp/
+*.tmp
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
