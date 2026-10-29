@@ -1,46 +1,47 @@
-# Tiny ERP V3 - Central Auth ETL
+# Tiny ERP V3 → BigQuery: Multi-tenant ETL
 
-Este projeto realiza a extração de dados da API V3 do Tiny ERP e carrega no Google BigQuery em camadas de Data Lake (RAW).
+Extracts data from the Tiny ERP API V3 and loads it into Google BigQuery, in the raw layer of a medallion data lake. Runs as two Cloud Run Jobs, scheduled daily, serving multiple clients from a single codebase.
 
-## 🚀 Estrutura de Execução
+## 🚀 How it runs
 
-O projeto é dividido em dois processos principais:
+The pipeline is split into two jobs:
 
-1.  **PAI (Headers):** Sincroniza cabeçalhos e índices (`pedidos`, `notas`, `produtos`, `contas`).
-2.  **FILHO (Details):** Sincroniza detalhes específicos (`itens`, `parcelas`) de cada registro.
+1. **PAI (headers):** syncs top-level records and indexes: orders (`pedidos`), invoices (`notas`), products (`produtos`) and accounts (`contas`).
+2. **FILHO (details):** syncs the details of each record: order items (`itens`) and installments (`parcelas`).
 
-Ambos os jobs são multi-tenant: a lista de clientes, tokens de acesso e refresh tokens ficam
-armazenados em uma tabela de configuração no BigQuery (`tiny_configs.clients`), não no código.
+Both jobs are multi-tenant: the client list, access tokens and refresh tokens are stored in a BigQuery config table (`tiny_configs.clients`), not in the code.
 
-## ⚙️ Variáveis de Ambiente
+> Table and entity names are kept in Portuguese because they mirror the Tiny ERP API.
 
-Configure estas variáveis no Cloud Run Job:
+## ⚙️ Environment variables
 
-| Variável | Obrigatória | Padrão | Descrição |
+Set these on the Cloud Run Job:
+
+| Variable | Required | Default | Description |
 |---|---|---|---|
-| `PROJECT_ID` | Sim | — | ID do seu projeto no GCP |
-| `BQ_LOCATION` | Não | `US` | Região do BigQuery |
-| `SLACK_WEBHOOK_URL` | Não | — | Webhook para relatório de execução no Slack |
-| `ONLY_CLIENTS` | Não | `ALL` | Lista de clientes separados por vírgula (ex: `cliente_a,cliente_b`) |
-| `ONLY_ENTITIES` | Não | `ALL` | Lista de endpoints separados por vírgula (ex: `pedidos,notas`) |
-| `LOOKBACK_DAYS` | Não (PAI) | `0` | Reprocessamento manual: quantos dias voltar a partir de hoje |
-| `PAI_OVERLAP_DAYS` | Não (PAI) | `3` | Janela de sobreposição para capturar pedidos cadastrados retroativamente |
-| `REFRESH_DAYS` | Não (FILHO) | `0` | Reprocessa detalhes dos últimos N dias (DELETE+INSERT) |
-| `FORCE_FULL_REFRESH` | Não (FILHO) | `false` | Força carga completa, ignorando watermark |
-| `FORCE_RERUN` | Não (FILHO) | `false` | Ignora o controle de "já concluído hoje" |
-| `MAX_WORKERS` | Não (FILHO) | `10` | Threads paralelas para busca de detalhes |
+| `PROJECT_ID` | Yes | — | Your GCP project ID |
+| `BQ_LOCATION` | No | `US` | BigQuery region |
+| `SLACK_WEBHOOK_URL` | No | — | Webhook for the run report in Slack |
+| `ONLY_CLIENTS` | No | `ALL` | Comma-separated client list (e.g. `cliente_a,cliente_b`) |
+| `ONLY_ENTITIES` | No | `ALL` | Comma-separated endpoint list (e.g. `pedidos,notas`) |
+| `LOOKBACK_DAYS` | No (PAI) | `0` | Manual backfill: how many days back from today to reprocess |
+| `PAI_OVERLAP_DAYS` | No (PAI) | `3` | Overlap window to catch records created retroactively |
+| `REFRESH_DAYS` | No (FILHO) | `0` | Reprocesses details from the last N days (DELETE + INSERT) |
+| `FORCE_FULL_REFRESH` | No (FILHO) | `false` | Forces a full load, ignoring the watermark |
+| `FORCE_RERUN` | No (FILHO) | `false` | Ignores the "already completed today" check |
+| `MAX_WORKERS` | No (FILHO) | `10` | Parallel threads for fetching details |
 
-## 📦 Como fazer o Deploy
+## 📦 Deployment
 
-### 1. Build da Imagem (Artifact Registry)
+### 1. Build the image (Artifact Registry)
 
 ```bash
 gcloud builds submit --tag southamerica-east1-docker.pkg.dev/[GCP_PROJECT_ID]/tiny-repo/tiny-v3-etl .
 ```
 
-Troque `[GCP_PROJECT_ID]` pelo ID do seu projeto no GCP.
+Replace `[GCP_PROJECT_ID]` with your GCP project ID.
 
-### 2. Deploy como Cloud Run Job
+### 2. Deploy as Cloud Run Jobs
 
 ```bash
 gcloud run jobs create tiny-etl-pai \
@@ -60,24 +61,16 @@ gcloud run jobs create tiny-etl-filho \
   --args append_filho.py
 ```
 
-### 3. Agendamento (Cloud Scheduler)
+### 3. Scheduling (Cloud Scheduler)
 
-Cada job pode ser agendado via Cloud Scheduler, disparando o Cloud Run Job em um
-horário fixo (ex: diariamente às 03h, horário de Brasília).
+Each job can be triggered by Cloud Scheduler at a fixed time (e.g. daily at 3 a.m., Brasília time).
 
-## 🗂️ Estrutura de dados
+## 🗂️ Data design
 
-- **PAI**: grava um registro por entidade de topo (`pedidos`, `notas`, `contas_pagar`, etc.) na
-  camada RAW, usando `WRITE_APPEND` (incremental, com watermark) ou `WRITE_TRUNCATE`
-  (tabelas de referência, carga completa).
-- **FILHO**: busca o detalhe de cada ID gerado pelo PAI (itens do pedido, parcelas, etc.) e
-  grava em tabelas `*_detalhe`, controlando o que já foi processado para evitar reprocessamento
-  desnecessário.
-- **Watermarks**: cada entidade tem sua data de corte salva em tabelas dedicadas
-  (`pai_watermarks`, `child_watermarks`), garantindo que apenas dados novos sejam buscados
-  a cada execução.
+- **PAI** writes one record per top-level entity (`pedidos`, `notas`, `contas_pagar`, etc.) to the raw layer, using `WRITE_APPEND` (incremental, watermark-based) or `WRITE_TRUNCATE` (full load for reference tables).
+- **FILHO** fetches the details of every ID produced by PAI (order items, installments, etc.) and writes them to `*_detalhe` tables, tracking what was already processed to avoid unnecessary reprocessing.
+- **Watermarks:** each entity's cutoff date is stored in dedicated tables (`pai_watermarks`, `child_watermarks`), so each run only fetches new data.
 
-## 🔒 Segurança
+## 🔒 Security
 
-Nenhuma credencial (token, client secret) fica no código. Tudo é lido de uma tabela de
-configuração no BigQuery e renovado automaticamente via OAuth refresh token quando expira.
+No credentials (tokens, client secrets) live in the code. Everything is read from a BigQuery config table, and access tokens are renewed automatically through the OAuth refresh token when they expire.
